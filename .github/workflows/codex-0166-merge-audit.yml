@@ -30,14 +30,18 @@ jobs:
           git fetch --no-tags --depth=1 codex-upstream \
             refs/tags/rust-v0.164.0:refs/audit/upstream-0164 \
             refs/tags/rust-v0.166.0:refs/audit/upstream-0166
-          base="$(git rev-parse 'refs/audit/upstream-0164^{commit}')"
+          git fetch --no-tags --depth=1 codex-upstream \
+            342ed69a174c206c1de52a59491b131e0753cfa5:refs/audit/true-base
+          release="$(git rev-parse 'refs/audit/upstream-0164^{commit}')"
+          base="$(git rev-parse 'refs/audit/true-base^{commit}')"
           target="$(git rev-parse 'refs/audit/upstream-0166^{commit}')"
           fork="$(git rev-parse HEAD)"
-          test "$base" = "6aaac694803004a63c6f393d153c96d22521a6b9"
+          test "$release" = "6aaac694803004a63c6f393d153c96d22521a6b9"
+          test "$base" = "342ed69a174c206c1de52a59491b131e0753cfa5"
           test "$target" = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856"
           test "$fork" = "7a23b657069efffae459a8a4d230b4943a150a4b"
-          printf 'BASE=%s\nTARGET=%s\nFORK=%s\n' "$base" "$target" "$fork" >> "$GITHUB_ENV"
-          printf 'Source commits verified: %s, %s, %s\n' "$base" "$target" "$fork"
+          printf 'BASE=%s\nTARGET=%s\nFORK=%s\nRELEASE=%s\n' "$base" "$target" "$fork" "$release" >> "$GITHUB_ENV"
+          printf 'Source commits verified: base=%s, release=%s, target=%s, fork=%s\n' "$base" "$release" "$target" "$fork"
 
       - name: Simulate exact three-way merge and record conflicts
         shell: bash
@@ -91,7 +95,8 @@ jobs:
               "# Codex 0.166 merge dry-run",
               "",
               f"- Fork main: {os.environ['FORK']}",
-              f"- Merge base explicitly pinned: {os.environ['BASE']}",
+              f"- Fork's upstream 0.164 release commit: {os.environ['RELEASE']}",
+              f"- Real Git merge base: {os.environ['BASE']}",
               f"- Upstream target: {os.environ['TARGET']}",
               f"- Git merge-tree exit code: {status} (0=clean, 1=conflicts)",
               f"- Fork changed files against 0.164: **{len(fork)}**",
@@ -109,7 +114,7 @@ jobs:
           lines_out.extend(["", "## Conflicted paths", ""])
           lines_out += [f"- {path}" for path in conflicts]
           lines_out.extend(["", "## Scope and limitations", "",
-              "This is Git's three-way merge algorithm with the exact 0.164 common baseline; "
+              "This is Git's three-way merge algorithm with GitHub's verified true common ancestor; "
               "it does not compile, run tests or prove runtime compatibility. "
               "Files which merge cleanly may still require interface changes. "
               "The assessment does not modify the fork's main branch.",
