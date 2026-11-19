@@ -43,6 +43,7 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          set +e
           mkdir -p audit-result
           git merge-tree --write-tree --name-only --no-messages --merge-base="$BASE" "$FORK" "$TARGET" \
             > audit-result/merge-tree-names.txt 2> audit-result/merge-tree-stderr.txt
