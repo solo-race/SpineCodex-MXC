@@ -1,0 +1,130 @@
+name: Codex 0.166 merge-conflict assessment
+
+on:
+  push:
+    branches:
+      - audit/codex-0.166-merge-20261119
+    paths:
+      - .github/workflows/codex-0166-merge-audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  merge-tree-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out untouched fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fetch pinned upstream 0.164 and 0.166
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add codex-upstream https://github.com/openai/codex.git
+          git fetch --no-tags --depth=1 codex-upstream \
+            refs/tags/rust-v0.164.0:refs/audit/upstream-0164 \
+            refs/tags/rust-v0.166.0:refs/audit/upstream-0166
+          base="$(git rev-parse 'refs/audit/upstream-0164^{commit}')"
+          target="$(git rev-parse 'refs/audit/upstream-0166^{commit}')"
+          fork="$(git rev-parse HEAD)"
+          test "$base" = "6aaac694803004a63c6f393d153c96d22521a6b9"
+          test "$target" = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856"
+          test "$fork" = "7a23b657069efffae459a8a4d230b4943a150a4b"
+          printf 'BASE=%s\nTARGET=%s\nFORK=%s\n' "$base" "$target" "$fork" >> "$GITHUB_ENV"
+          printf 'Source commits verified: %s, %s, %s\n' "$base" "$target" "$fork"
+
+      - name: Simulate exact three-way merge and record conflicts
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p audit-result
+          git merge-tree --write-tree --name-only --no-messages --merge-base="$BASE" "$FORK" "$TARGET" \
+            > audit-result/merge-tree-names.txt 2> audit-result/merge-tree-stderr.txt
+          status=$?
+          printf '%s\n' "$status" > audit-result/merge-exit-code.txt
+          git merge-tree --write-tree --messages --merge-base="$BASE" "$FORK" "$TARGET" \
+            > audit-result/merge-tree-messages.txt 2>&1
+          verbose_status=$?
+          if [[ $status -gt 1 || $verbose_status -gt 1 ]]; then
+            cat audit-result/merge-tree-stderr.txt
+            cat audit-result/merge-tree-messages.txt
+            exit 1
+          fi
+          python3 - <<'PY'
+          import collections
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+
+          output = Path("audit-result")
+          lines = (output / "merge-tree-names.txt").read_text().splitlines()
+          if not lines or not re.fullmatch(r"[0-9a-f]{40,64}", lines[0]):
+              raise RuntimeError("merge-tree did not provide a merged tree SHA")
+          conflicts = sorted(set(line.strip() for line in lines[1:] if line.strip()))
+          fork = set(subprocess.check_output(
+              ["git", "diff", "--name-only", os.environ["BASE"], os.environ["FORK"]],
+              text=True).splitlines())
+          upstream = set(subprocess.check_output(
+              ["git", "diff", "--name-only", os.environ["BASE"], os.environ["TARGET"]],
+              text=True).splitlines())
+          overlapping = fork & upstream
+          status = int((output / "merge-exit-code.txt").read_text().strip())
+          if (status == 0 and conflicts) or (status == 1 and not conflicts):
+              raise RuntimeError(f"unexpected merge-tree status {status}, conflicts {len(conflicts)}")
+          def module(path):
+              parts = path.split("/")
+              if len(parts) >= 2 and parts[0] == "codex-rs":
+                  return "/".join(parts[:2])
+              return parts[0]
+          grouped = collections.defaultdict(list)
+          for path in conflicts:
+              grouped[module(path)].append(path)
+          lines_out = [
+              "# Codex 0.166 merge dry-run",
+              "",
+              f"- Fork main: {os.environ['FORK']}",
+              f"- Merge base explicitly pinned: {os.environ['BASE']}",
+              f"- Upstream target: {os.environ['TARGET']}",
+              f"- Git merge-tree exit code: {status} (0=clean, 1=conflicts)",
+              f"- Fork changed files against 0.164: **{len(fork)}**",
+              f"- Upstream changed files against 0.164: **{len(upstream)}**",
+              f"- Files changed on both sides: **{len(overlapping)}**",
+              f"- Actual Git merge conflicts: **{len(conflicts)}**",
+              "",
+              "## Conflict distribution",
+              "",
+              "| Module | Actual conflicted paths |",
+              "|---|---:|",
+          ]
+          for name, values in sorted(grouped.items(), key=lambda x: (-len(x[1]),x[0])):
+              lines_out.append(f"| {name} | {len(values)} |")
+          lines_out.extend(["", "## Conflicted paths", ""])
+          lines_out += [f"- {path}" for path in conflicts]
+          lines_out.extend(["", "## Scope and limitations", "",
+              "This is Git's three-way merge algorithm with the exact 0.164 common baseline; "
+              "it does not compile, run tests or prove runtime compatibility. "
+              "Files which merge cleanly may still require interface changes. "
+              "The assessment does not modify the fork's main branch.",
+          ])
+          report = "\n".join(lines_out) + "\n"
+          (output / "merge-audit.md").write_text(report)
+          print(report)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(report)
+          PY
+
+      - name: Upload assessment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-0166-merge-audit
+          path: audit-result/
+          if-no-files-found: warn
+          retention-days: 14
